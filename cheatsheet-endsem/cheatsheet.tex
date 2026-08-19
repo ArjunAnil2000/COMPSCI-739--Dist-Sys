@@ -1,0 +1,367 @@
+\documentclass[9pt]{article}
+\usepackage[a4paper, margin=0.5cm, top=0.5cm, bottom=0.5cm]{geometry}
+\usepackage{multicol}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{amsmath}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+
+\setlength{\columnsep}{0.4cm}
+\setlength{\columnseprule}{0.2pt}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{1pt}
+
+\titleformat{\section}{\normalfont\bfseries\fontsize{9}{10}\selectfont\centering}{}{0pt}{}
+\titlespacing{\section}{0pt}{3pt}{1.5pt}
+
+\setlist[itemize]{leftmargin=*,topsep=0pt,itemsep=0pt,parsep=0pt,partopsep=0pt,label=\textbullet}
+\setlist[enumerate]{leftmargin=*,topsep=0pt,itemsep=0pt,parsep=0pt,partopsep=0pt}
+
+\begin{document}
+\fontsize{7.77}{9.32}\selectfont
+\begin{multicols*}{2}
+
+%% ============================================================
+\section*{PAXOS (Basic / Single-Decree)}
+%% ============================================================
+
+\textbf{Goal:} Agree on one value. Fail-stop (not Byzantine). Persistent storage for fail-recovery.
+
+\textbf{Roles:} Proposers, Acceptors, Learners (same node can play all).
+
+\textbf{Proposal \#:} \texttt{[Round | ServerId]} — totally ordered, globally unique.
+
+\textbf{Quorum:} Any majority of acceptors; any two quorums share $\ge 1$ node.
+
+\textbf{Phase 1 — Prepare/Promise:}
+\begin{itemize}
+  \item Proposer sends \texttt{Prepare(n)} to all acceptors.
+  \item Acceptor replies \texttt{Promise(n, (n\_a, v\_a))} if $n >$ any seen; promises \emph{never to accept} $< n$; returns highest accepted \texttt{(n\_a, v\_a)} if any.
+\end{itemize}
+
+\textbf{Phase 2 — Accept/Accepted:}
+\begin{itemize}
+  \item Proposer collects promises from majority; picks $v$ = value from highest $n_a$ (or own if none). Sends \texttt{Accept(n, v)}.
+  \item Acceptor accepts unless promised to higher $n$; sends \texttt{Accepted(n,v)}.
+  \item Value \emph{chosen} once majority accepted. ``Accepted'' $\ne$ chosen (single node).
+\end{itemize}
+
+\textbf{Safety:} Only one value chosen. \textbf{Liveness:} Not guaranteed — dueling proposers livelock. Fix: elect a distinguished proposer (leader).
+
+\textbf{Multi-Paxos:} Stable leader skips Phase 1 for subsequent instances. Enables RSM. Used by Chubby, Spanner.
+
+\textbf{Cannot handle:} Byzantine failures; stuck if no majority available (partition).
+
+%% ============================================================
+\section*{RAFT}
+%% ============================================================
+
+\textbf{3 states:} Follower $\to$ Candidate $\to$ Leader; Leader sends heartbeats to Followers.
+
+\textbf{Terms:} Monotonically increasing integer; each server stores \texttt{currentTerm}. Higher term always wins — stale leaders step down immediately.
+
+\textbf{Election:}
+\begin{itemize}
+  \item Follower timeout $[T,2T]$; on expiry: increment term, become Candidate, vote for self, broadcast \texttt{RequestVote}.
+  \item Grant vote only if: candidate log $\ge$ own (last entry term higher, or same term + longer); hasn't voted this term.
+  \item Win on majority; immediately send heartbeats (AppendEntries, no entries).
+\end{itemize}
+
+\textbf{Log entry:} \texttt{(index, term, command)}. Index+term uniquely identify an entry (Log Matching Property).
+
+\textbf{AppendEntries RPC:} \texttt{(term, leaderId, prevLogIndex, prevLogTerm, entries[], leaderCommit)}. Follower rejects if log doesn't match at \texttt{prevLog*}; leader backs up \texttt{nextIndex[]} and retries — discovers + fixes inconsistencies.
+
+\textbf{Committed =} replicated to majority \emph{AND} leader committed an entry from its \emph{current term} (election safety: never count old-term entries alone).
+
+\textbf{Persistent state:} \texttt{currentTerm}, \texttt{votedFor}, \texttt{log[]} — must survive crashes.
+
+\textbf{Volatile:} \texttt{commitIndex}, \texttt{lastApplied}, \texttt{nextIndex[]}, \texttt{matchIndex[]}.
+
+\textbf{RequestVote RPC:} \texttt{(term, candidateId, lastLogIndex, lastLogTerm)} $\to$ \texttt{(term, voteGranted)}.
+
+\textbf{Leader Completeness:} Elected leader has all committed entries — guaranteed by vote restriction (log must be at least as up-to-date).
+
+%% ============================================================
+\section*{CHUBBY}
+%% ============================================================
+
+\textbf{Goal:} Coarse-grain \emph{lock service} for loosely-coupled distributed systems. Provides advisory locks, small files for metadata.
+
+\textbf{Architecture:} 5-server Paxos cell; one \emph{master} handles all reads and writes (linearizable). Master lease prevents stale reads from non-masters. Clients cache file content + metadata.
+
+\textbf{Client sessions:} Clients maintain KeepAlive lease with master. On session expiry, handles go \emph{jeopardized} then unsafe. On master failure, clients wait for new master lease.
+
+\textbf{Handles:} File/dir handles from \texttt{Open()}; hold locks, enable reads/writes. Locks are advisory. Events: lock acquired/released, file modified, master failover, handle invalidated — notified via callback.
+
+\textbf{Sequencer:} Lock holder passes \texttt{(lock-name, mode, seqno)} to application servers; servers validate with Chubby master that lock is still valid. Prevents use of stale locks after failover.
+
+\textbf{Coarse-grained:} Locks held for hours/days. Not for per-operation locking. Fat client library handles session management, caching, and failover.
+
+\textbf{Use cases:} GFS master election, BigTable master lock, config metadata, distributed barrier.
+
+\textbf{Limitation:} Single master = bottleneck at high RPC load; not for fine-grain locking.
+
+%% ============================================================
+\section*{ZOOKEEPER}
+%% ============================================================
+
+\textbf{Goal:} General-purpose coordination kernel; clients build higher-level primitives.
+
+\textbf{Reads:} From \emph{any replica} — wait-free, may be stale (not linearizable). \textbf{Writes:} Through leader via ZAB protocol — linearizable, totally ordered.
+
+\textbf{Guarantees:} Linearizable writes + FIFO per-client order = ``A-linearizability''. \texttt{sync()} op forces read to see all prior writes.
+
+\textbf{Znodes:} Persistent, ephemeral (deleted on client disconnect), sequential (auto-incremented suffix). Watches: one-shot async notification on change.
+
+\textbf{API:} \texttt{create, delete, exists, getData, setData, getChildren} — all with optional watch.
+
+\textbf{Sessions:} Client registers with a server; assigned session ID + timeout. Client must send heartbeats; on expiry all ephemeral nodes deleted. Session can migrate to another server on failure.
+
+\textbf{Versioned ops:} \texttt{setData(path, data, version)} fails if stored version $\ne$ expected — compare-and-swap semantics. Enables safe conditional updates.
+
+\textbf{Performance:} Read throughput scales linearly with replicas (any server). Write throughput bottlenecked at leader (ZAB broadcast). Optimized for read-heavy coordination workloads.
+
+\textbf{Use cases:} Leader election (ephemeral + watch), barriers, group membership, distributed locks (sequential znodes), config.
+
+\textbf{vs Chubby:} ZK scales reads with replicas; Chubby does not. ZK = primitives; Chubby = locks. ZK trades stale reads for throughput.
+
+%% ============================================================
+\section*{EPAXOS (Egalitarian Paxos)}
+%% ============================================================
+
+\textbf{Goal:} Leaderless consensus; optimal WAN latency; even load across all replicas.
+
+\textbf{Fast path (1 RTT):} Non-conflicting commands — proposer sends \texttt{PreAccept} to $\lfloor F/2\rfloor + \lceil F/2\rceil + 1$ replicas; if all agree on dependency set, commit immediately.
+
+\textbf{Slow path (2 RTT):} Conflicting (interfering, non-commutative) commands — falls back to standard Paxos Accept phase.
+
+\textbf{Agrees on:} Command + \emph{dependency set} (all cmds that must execute before it). Execution via dependency graph: find SCCs, topological sort, deterministic tie-break within SCC.
+
+\textbf{Instance space:} Each replica $r$ has its own column of slots $r.1, r.2,\ldots$ — no global slot assignment. Any replica can propose in its own column without coordination.
+
+\textbf{Quorum sizes:} $2F+1$ replicas total. Fast quorum = $\lfloor 3F/2\rfloor + 1$; slow (classic) quorum = $F+1$ (majority).
+
+\textbf{Recovery:} Crashed instances recovered via explicit Prepare phase (same as Paxos Phase 1) on the specific instance.
+
+\textbf{Interference:} Cmds $A,B$ interfere if $A;B \ne B;A$. Conflicting = interfering proposals at same replica in same instance.
+
+\textbf{vs Multi-Paxos:} No single leader bottleneck; any replica proposes; natural for multi-datacenter. Tradeoff: more complex execution; slow path on conflicts.
+
+%% ============================================================
+\section*{CONSISTENCY MODELS (strong $\to$ weak)}
+%% ============================================================
+
+\textbf{Linearizability:} Op appears atomic at a single point in real time between invocation and response. Non-overlapping: forced by real-time order. Concurrent (overlapping): any order valid. Single-copy semantics. (Raft, Chubby, Zab writes)
+
+\textbf{Sequential:} Total order consistent with each client's program order; no real-time constraint. (ZooKeeper overall, Lamport)
+
+\textbf{Causal:} Causally-related ops seen in same order by all; concurrent ops may differ. (COPS, Bayou, Occult)
+
+\textbf{Eventual:} All replicas converge if updates stop; no ordering. (Dynamo, Bayou reads)
+
+\textbf{Linearizability checking:}
+\begin{enumerate}
+  \item Draw timeline: invocation/response intervals per op.
+  \item Each op: pick atomic ``execution point'' within $[invoke, response]$.
+  \item Non-overlapping: execution order must match real-time order.
+  \item Overlapping (concurrent): any ordering between them is valid.
+  \item Linearizable iff valid assignment exists for all ops.
+\end{enumerate}
+
+\textbf{CAP:} Under partition, choose Consistency (strong) OR Availability. Bayou/Dynamo = A; Raft/Chubby/Zab = C.
+
+%% ============================================================
+\section*{BAYOU}
+%% ============================================================
+
+\textbf{Goal:} Weakly-connected replicated storage (mobile/intermittent); eventual consistency with app-controlled conflict resolution.
+
+\textbf{Write structure:} Each write carries: \emph{dependency check} (query: detect conflict), \emph{merge procedure} (app-specific resolution code), \emph{update}. If dep-check fails, merge proc runs.
+
+\textbf{Log:} Tentative (unordered recent writes) + committed (stable ordered). Primary server assigns commit order. Tentative log re-executed as new writes arrive.
+
+\textbf{Write ID:} \texttt{(timestamp, serverId)} — assigned at creation, globally unique, never changes. Used for ordering + deduplication during anti-entropy.
+
+\textbf{Anti-entropy:} Pairwise gossip sync; nodes exchange missing writes by comparing version vectors. No central master required.
+
+\textbf{Session guarantee:} Read-your-writes within a session (same server). Primary is the only server that commits writes and assigns stable sequence numbers.
+
+\textbf{Clients read tentative data} — must tolerate uncertainty. On reconnect with primary, tentative writes become committed in primary's order. CAP: chooses availability.
+
+%% ============================================================
+\section*{FACEBOOK TAO: EXISTENTIAL CONSISTENCY (SOSP '15)}
+%% ============================================================
+
+\textbf{TAO:} Facebook's eventually consistent social graph cache. Objects = vertices (users, posts); edges = relationships. Async replication primary $\to$ replicas. \textbf{Vulnerability window:} time during async replication when anomalies can occur.
+
+\textbf{Tension:} Consistency (hard to quantify) vs Performance (simple to quantify). First study of consistency in a large-scale production system.
+
+\textbf{Anomaly types:} (1) Real-time violation — stale read after write completes (OOB communication). (2) Ordering anomaly — two users see concurrent writes in different order (Oculus example).
+
+\textbf{Methodology:} Sample 1-in-1M objects; log start/finish time, R/W, value. 12 days, 17M objects, 3B requests. Time skew P99.9 = 35ms — extend durations to avoid false positives. Local models (linearizability, per-object sequential, RAW) checkable per-object; non-local (causal) cannot be sampled.
+
+\textbf{Linearizability checker:} Graph with write ops as vertices, real-time order as edges. Merge read with its write. \emph{Anomaly iff cycle.}
+
+\textbf{Results:} 5 linearizability anomalies/million reads (TAO is highly consistent). Sensitive apps mark reads \emph{critical} $\to$ routed through master $\to$ linearizable.
+
+%% ============================================================
+\section*{RIFL (Reusable Infrastructure for Linearizability)}
+%% ============================================================
+
+\textbf{Problem:} RPCs are at-least-once — retries re-execute non-idempotent ops (double-charge, double-insert).
+
+\textbf{Solution:} Exactly-once RPCs. Tag each RPC with \texttt{(clientId, rpcSeqNum)}. Server stores result durably; on retry returns stored result, skips re-execution.
+
+\textbf{ClientId:} Assigned by master with lease. Lease expiry + no renewal $\Rightarrow$ safe to GC stored results.
+
+\textbf{RAMCloud impl:} Results stored in log alongside data; GC when client ACKs receipt. $<5\%$ overhead; $\approx$22 $\mu$s transaction commit latency.
+
+%% ============================================================
+\section*{OCCULT}
+%% ============================================================
+
+\textbf{Problem — Slowdown Cascade:} In causal consistency with heterogeneous servers: client reads from slow replica $S_1$ $\to$ picks up old timestamp $\to$ subsequent reads from faster replicas $S_2, S_3$ must wait until they're as fresh as $S_1$ $\to$ cascade of waits across all future reads.
+
+\textbf{Occult (``I Can't Believe It's Not Causal!''):} Break cascade by identifying writes that are \emph{nil-external} at the slow replica. If the causal dependency is nil-external, a faster replica can skip waiting for it — client observes same result. Achieves near-linearizable performance while preserving causal consistency guarantees. (SOSP '21)
+
+\textbf{Setting:} Heterogeneous cluster — mix of fast (SSD) and slow (HDD) replicas all claiming causal consistency. One slow read poisons all subsequent reads across faster replicas.
+
+\textbf{Protocol:} Annotate ops as nil-external when provably unobservable. Receivers skip waiting for nil-external deps in the causal chain — cascade broken.
+
+\textbf{Result:} 60--90\% latency reduction vs standard causal consistency; performance indistinguishable from linearizable for most workloads.
+
+\textbf{Key insight:} Not all causal dependencies are observable. If dependency is invisible to client, enforcing it is unnecessary cost.
+
+%% ============================================================
+\section*{NIL-EXTERNALITY}
+%% ============================================================
+
+\textbf{Nil-External (NIL) op:} An operation whose effects \emph{cannot be observed by any external agent} at that instant. Example: write to a key that no current client is watching; read of a value that will be overwritten before anyone sees it.
+
+\textbf{Exploitation:} Nil-external ops can be deferred, reordered, or batched without violating correctness from any client's perspective.
+
+\textbf{Application:} Used by Occult to break slowdown cascades. Used more broadly to reduce coordination costs in distributed systems — skip expensive synchronization when the operation's effects are provably invisible.
+
+%% ============================================================
+\section*{GFS (Google File System)}
+%% ============================================================
+
+\textbf{Architecture:} 1 Master (all metadata in memory; op log + checkpoints) + many Chunkservers (64 MB chunks, 3 replicas as Linux files).
+
+\textbf{Metadata:} File namespace, file$\to$chunk map, chunk$\to$location. Locations \emph{not persisted} — re-polled at startup/heartbeat.
+
+\textbf{Read:} Client asks master for chunk handle + locations $\to$ reads from closest chunkserver. Master \emph{not on data path}.
+
+\textbf{Write (mutation):}
+\begin{enumerate}
+  \item Client gets primary + secondaries from master (60s lease to primary).
+  \item Client pushes data in chain to all replicas (network-topology aware, buffered in LRU).
+  \item Client sends write to \emph{primary}; primary assigns serial order, applies, forwards to secondaries.
+  \item Secondaries ACK to primary; primary ACKs client. Any failure $\to$ retry.
+\end{enumerate}
+
+\textbf{Record Append:} Atomic append at GFS-chosen offset (last chunk). Padding if overflow. At-least-once (client retries may get duplicates).
+
+\textbf{Consistency:} Relaxed/weak — defined but not consistent after failed mutations. Non-POSIX. High sustained bandwidth $>$ low latency (design priority).
+
+\textbf{Caching:} Clients and chunkservers do \emph{not} cache data. Clients cache metadata (chunk locations) only.
+
+\textbf{Metadata:} Namespace + file$\to$chunk mapping persisted (op log); chunk$\to$location \emph{not} persisted — re-polled via heartbeats. Heartbeats: chunkserver $\to$ master.
+
+\textbf{Locking:} Read locks on all parent directories; write lock only on the target file. Directories have no metadata.
+
+\textbf{Deletion:} Lazy — file renamed to hidden name; master GCs after fixed interval. Heartbeat replies list chunks no longer in master metadata $\to$ chunkserver deletes them.
+
+\textbf{Chunk size 64 MB:} Reduces master interactions (fewer metadata lookups), reduces metadata size, enables persistent TCP connections. Downside: hot spots for small popular files.
+
+\textbf{Master in RAM:} All metadata fits in memory; master not on data path after initial chunk lookup — clients go directly to chunkservers.
+
+\textbf{Stale detection:} Chunk version numbers — master detects stale replicas after chunkserver restart. \textbf{Shadow masters:} read-only replicas of master state (slightly stale). \textbf{Checksums:} per 64 KB block to detect corruption.
+
+%% ============================================================
+\section*{DYNAMO (Amazon)}
+%% ============================================================
+
+\textbf{Requirements:} $\sim$10k servers; P99.9 latency target; \emph{always-writable} — highly available writes over strong consistency (shopping cart).
+
+\textbf{Consistent hashing:} Keys + nodes on virtual ring; key owned by first $N$ clockwise nodes. \emph{Virtual nodes}: each physical server = multiple ring tokens (load balance, heterogeneity).
+
+\textbf{Preference list:} First $N$ distinct physical nodes clockwise; sloppy quorum uses these.
+
+\textbf{Vector clocks:} Per-key causal history: \texttt{[(node, counter)]}. Client reconciles divergent versions (siblings) on read. Pruning: drop oldest if clock too large.
+
+\textbf{Sloppy quorum:} $R + W > N$ (typically $N{=}3, R{=}2, W{=}2$). ``Sloppy'' = any $N$ healthy nodes, not strictly the ring's $N$. \emph{Hinted handoff}: write to substitute with hint to forward on recovery.
+
+\textbf{Anti-entropy:} \emph{Merkle trees} per key range — efficient diff detection; background sync of diverging subtrees only.
+
+\textbf{Gossip:} Failure detection + membership — no central coordinator.
+
+\textbf{get()/put() context:} Both return a \emph{context} object containing the version vector \texttt{[(node, counter)]} for all nodes a write reached. Client passes context back on writes to maintain causality.
+
+\textbf{CAP choice:} Explicitly AP — during partitions, writes always succeed on any healthy node; consistency deferred to read time via reconciliation.
+
+\textbf{Read repair:} After client reconciles divergent siblings, merged version written back to out-of-date replicas.
+
+\textbf{Reconciliation:} Syntactic (automatic — e.g., last-write-wins by timestamp) vs Semantic (app-defined — e.g., union of cart). Syntactic can lose data.
+
+%% ============================================================
+\section*{BIGTABLE}
+%% ============================================================
+
+\textbf{Goal:} Semi-structured data at petabyte scale: 100 TB+, billions URLs, few-ms latency, variable schema.
+
+\textbf{Data model:} Sorted map: \texttt{(rowkey, col\_family:qualifier, timestamp)} $\to$ value. Rows sorted lexicographically. Row range = \emph{tablet} (distribution + load balancing unit).
+
+\textbf{Architecture:} Master (tablet assignment, load balancing, schema, GC) + Tablet Servers (serve $\sim$100 tablets, R/W) + GFS (SSTables + WAL) + Chubby (master election, tablet server liveness, schema locks, root tablet location).
+
+\textbf{Write:} WAL + memtable. \textbf{Read:} Merge memtable + SSTables (most recent wins).
+
+\textbf{Compaction:} Minor (memtable $\to$ SSTable), merging (multiple $\to$ one), major (all merged, deletes applied). Bloom filters on SSTables for fast negative lookups.
+
+\textbf{Locality groups:} Column families grouped on disk; separate SSTables per group; mark group in-memory for hot data; compression per-group.
+
+\textbf{Row atomicity:} Reads/writes to a single row are atomic across all column families — strongest per-row guarantee.
+
+\textbf{Wide vs Tall rows:} Wide = many columns per row (``tell me everything about this key'', $<$100 MB/row). Tall = split into multiple rowkeys with field promotion (``does relationship exist?''). Wide adv = one lookup; Tall adv = efficient range scans on sub-entities.
+
+\textbf{API:} Write: \texttt{set}/\texttt{delete} — atomic per-row. Read: \texttt{lookup} (point) or \texttt{stream} (scan range across column families) — more efficient, fewer round-trips than key-value.
+
+\textbf{Client caches} tablet location after first lookup — bypasses master on subsequent requests. Master is thin (not on data path).
+
+\textbf{Consistency:} Strongly consistent within a tablet — single tablet server at a time (Chubby ensures). Not eventual.
+
+\textbf{vs GFS:} unstructured bytes. \textbf{vs RDBMS:} too large, no fixed schema. \textbf{vs Dynamo:} stronger consistency.
+
+%% ============================================================
+\section*{SPANNER (Google)}
+%% ============================================================
+
+\textbf{Goal:} Globally-distributed, externally consistent (linearizable), cross-shard ACID transactions, SQL.
+
+\textbf{Motivation:} BigTable lacks general-purpose transactions, complex multi-table schemas, SQL. Spanner unifies at global scale.
+
+\textbf{Deployment:} Universe $\to$ Zones (datacenters) $\to$ Spanservers. One \emph{Paxos group per shard (tablet)}; elected leader per group; \emph{directory} = smallest unit of data movement.
+
+\textbf{TrueTime API:} \texttt{TT.now()} $\to$ interval \texttt{[earliest, latest]}; \texttt{TT.after(t)}, \texttt{TT.before(t)}. GPS + atomic clocks per datacenter. Uncertainty $\epsilon \approx 1$--7 ms; bounded.
+
+\textbf{External consistency:} If $T_1$ commits before $T_2$ starts $\Rightarrow$ $s_1 < s_2$. Achieved by \emph{commit-wait}: pick $s \ge TT.now().latest$; wait until $TT.after(s)$ before releasing locks.
+
+\textbf{Read-only txn:} Snapshot read at $t_{safe}$ (all in-flight writes $\le t$ applied). No locks; any up-to-date replica. Timestamp = $TT.now().latest$.
+
+\textbf{Read-write txn:} 2PL (acquire locks) + 2PC (cross-shard atomic commit); each Paxos group logs prepare/commit. Commit-wait ensures external consistency.
+
+\textbf{Globally consistent reads @ timestamp:} Any replica can serve a read-only txn at a past timestamp $t$ once $t_{safe} \ge t$ — enables consistent snapshots across shards without locks.
+
+\textbf{$t_{safe}$:} $\min(t_{safe,Paxos},\ t_{safe,TM})$. Paxos safe time = timestamp of highest prepared write. TM safe time = $\infty$ if no in-flight 2PC transactions (else blocked). Read-only txn at $t$ must wait until $t_{safe} \ge t$.
+
+\textbf{Strict serializability:} Spanner achieves serializability (txn isolation) + external consistency (real-time ordering) = strictest isolation. Wound-wait used for deadlock avoidance.
+
+\textbf{Schema:} Relational tables; \emph{interleaved} tables store child rows adjacent to parent — eliminates join overhead for hierarchical data.
+
+\textbf{Challenges without TrueTime:} (1) Non-leader replicas lag $\to$ stale reads. (2) Cross-shard txns need atomic commit across independent Paxos groups. TrueTime solves ordering; 2PC solves atomicity.
+
+\end{multicols*}
+\end{document}
